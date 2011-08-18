@@ -1,0 +1,324 @@
+diff -r -U4 oidentd-2.0.8/ChangeLog oidentd-2.0.8a/ChangeLog
+--- oidentd-2.0.8/ChangeLog	2006-05-22 06:09:34.000000000 +0100
++++ oidentd-2.0.8a/ChangeLog	2007-04-10 18:57:11.000000000 +0100
+@@ -1,4 +1,10 @@
++Tue Apr 10 18:45:00 BST 2006    Simon Arlott <oidentd@fire.lp0.eu>
++
++    * Fix bug handling NAT with a different destination port on Linux.
++
++    * Fix forwarding when the destination port is different.
++
+ Mon May 22 00:20:15 EDT 2006    Ryan McCabe <ryan@numb.org>
+ 
+     * Released as version 2.0.8.
+ 
+diff -r -U4 oidentd-2.0.8/src/kernel/darwin.c oidentd-2.0.8a/src/kernel/darwin.c
+--- oidentd-2.0.8/src/kernel/darwin.c	2006-05-22 05:45:28.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/darwin.c	2007-04-10 18:43:31.000000000 +0100
+@@ -263,8 +263,9 @@
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+ 		int ret;
+ 		in_port_t masq_lport;
++		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1)
+ 			break;
+ 
+@@ -293,13 +294,14 @@
+ 
+ 		lport = ntohs(lport);
+ 		fport = ntohs(fport);
+ 		masq_lport = ntohs(nat.nat_inport);
++		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+ 		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, &ss);
++			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+ 			if (ret == 0)
+ 				return (0);
+ 			else {
+ 				char ipbuf[MAX_IPLEN];
+diff -r -U4 oidentd-2.0.8/src/kernel/freebsd5.c oidentd-2.0.8a/src/kernel/freebsd5.c
+--- oidentd-2.0.8/src/kernel/freebsd5.c	2006-05-22 05:31:19.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/freebsd5.c	2007-04-10 18:44:26.000000000 +0100
+@@ -416,8 +416,9 @@
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+ 		int ret;
+ 		in_port_t masq_lport;
++		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1) {
+ 			debug("getbuf: %s", strerror(errno));
+ 			break;
+@@ -448,13 +449,14 @@
+ 
+ 		lport = ntohs(lport);
+ 		fport = ntohs(fport);
+ 		masq_lport = ntohs(nat.nat_inport);
++		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+ 		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, &ss);
++			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+ 
+ 			if (ret == 0)
+ 				return (0);
+ 			else {
+diff -r -U4 oidentd-2.0.8/src/kernel/freebsd.c oidentd-2.0.8a/src/kernel/freebsd.c
+--- oidentd-2.0.8/src/kernel/freebsd.c	2006-05-22 05:31:19.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/freebsd.c	2007-04-10 18:44:15.000000000 +0100
+@@ -435,8 +435,9 @@
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+ 		int ret;
+ 		in_port_t masq_lport;
++		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1) {
+ 			debug("getbuf: %s", strerror(errno));
+ 			break;
+@@ -467,13 +468,14 @@
+ 
+ 		lport = ntohs(lport);
+ 		fport = ntohs(fport);
+ 		masq_lport = ntohs(nat.nat_inport);
++		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+ 		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, &ss);
++			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+ 
+ 			if (ret == 0)
+ 				return (0);
+ 			else {
+diff -r -U4 oidentd-2.0.8/src/kernel/linux.c oidentd-2.0.8a/src/kernel/linux.c
+--- oidentd-2.0.8/src/kernel/linux.c	2006-05-22 04:58:53.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/linux.c	2007-04-10 19:58:44.000000000 +0100
+@@ -323,32 +323,34 @@
+ 		char user[MAX_ULEN];
+ 		in_addr_t remoten;
+ 		in_addr_t localm;
+ 		in_addr_t remotem;
++		in_addr_t localn;
+ 		struct sockaddr_storage ss;
+ 		int ret;
+ 
+ 		if (!netfilter) {
+ 			u_int32_t mport_temp;
++			u_int32_t nport_temp;
+ 			u_int32_t masq_lport_temp;
+ 			u_int32_t masq_fport_temp;
+ 
+-			ret = sscanf(buf, "%15s %X:%X %X:%X %X %*X %*d %*d %*u",
++			ret = sscanf(buf, "%15s %X:%X %X:%X %X %X %*d %*d %*u",
+ 					proto, &localm, &masq_lport_temp,
+-					&remotem, &masq_fport_temp, &mport_temp);
++					&remotem, &masq_fport_temp, &mport_temp, &nport_temp);
+ 
+-			if (ret != 6)
++			if (ret != 7)
+ 				continue;
+ 
+ 			mport = (in_port_t) mport_temp;
++			nport = (in_port_t) nport_temp;
+ 			masq_lport = (in_port_t) masq_lport_temp;
+ 			masq_fport = (in_port_t) masq_fport_temp;
+ 		} else {
+ 			int l1, l2, l3, l4, r1, r2, r3, r4;
+ 			int nl1, nl2, nl3, nl4, nr1, nr2, nr3, nr4;
+ 			u_int32_t nport_temp;
+ 			u_int32_t mport_temp;
+-			in_addr_t localn;
+ 			u_int32_t masq_lport_temp;
+ 			u_int32_t masq_fport_temp;
+ 
+ 			ret = sscanf(buf,
+@@ -380,39 +382,36 @@
+ 			remotem = r1 << 24 | r2 << 16 | r3 << 8 | r4;
+ 
+ 			localn = nl1 << 24 | nl2 << 16 | nl3 << 8 | nl4;
+ 			remoten = nr1 << 24 | nr2 << 16 | nr3 << 8 | nr4;
+-
+-			if (remotem != localn)
+-				remotem = localn;
+ 		}
+ 
+ 		if (strcasecmp(proto, "tcp"))
+ 			continue;
+ 
+ 		if (mport != lport)
+ 			continue;
+ 
+-		if (masq_fport != fport)
++		if (nport != fport)
+ 			continue;
+ 
+-		if (remotem != ntohl(SIN4(faddr)->sin_addr.s_addr)) {
++		if (localn != ntohl(SIN4(faddr)->sin_addr.s_addr)) {
+ 			if (!opt_enabled(PROXY))
+ 				continue;
+ 
+ 			if (SIN4(faddr)->sin_addr.s_addr != SIN4(&proxy)->sin_addr.s_addr)
+ 				continue;
+ 
+-			if (remotem == SIN4(&proxy)->sin_addr.s_addr)
++			if (localn == SIN4(&proxy)->sin_addr.s_addr)
+ 				continue;
+ 		}
+ 
+ 		sin_setv4(htonl(localm), &ss);
+ 
+ 		if (opt_enabled(FORWARD)) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+-			if (fwd_request(sock, lport, masq_lport, fport, &ss) == 0)
++			if (fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss) == 0)
+ 				goto out_success;
+ 
+ 			get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 
+diff -r -U4 oidentd-2.0.8/src/kernel/netbsd.c oidentd-2.0.8a/src/kernel/netbsd.c
+--- oidentd-2.0.8/src/kernel/netbsd.c	2006-05-22 05:51:14.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/netbsd.c	2007-04-10 18:44:44.000000000 +0100
+@@ -289,8 +289,9 @@
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+ 		int ret;
+ 		in_port_t masq_lport;
++		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1)
+ 			break;
+ 
+@@ -319,13 +320,14 @@
+ 
+ 		lport = ntohs(lport);
+ 		fport = ntohs(fport);
+ 		masq_lport = ntohs(nat.nat_inport);
++		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+ 		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, &ss);
++			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+ 			if (ret == 0)
+ 				return (0);
+ 			else {
+ 				char ipbuf[MAX_IPLEN];
+diff -r -U4 oidentd-2.0.8/src/kernel/openbsd30.c oidentd-2.0.8a/src/kernel/openbsd30.c
+--- oidentd-2.0.8/src/kernel/openbsd30.c	2006-05-22 01:31:19.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/openbsd30.c	2007-04-10 18:45:23.000000000 +0100
+@@ -124,8 +124,9 @@
+ 	char os[24];
+ 	char user[MAX_ULEN];
+ 	struct sockaddr_storage ss;
+ 	in_port_t masq_lport;
++	in_port_t masq_fport;
+ 
+ 	if (faddr->ss_family != AF_INET || laddr->ss_family != AF_INET)
+ 		return (-1);
+ 
+@@ -156,13 +157,14 @@
+ 
+ 	fport = ntohs(fport);
+ 	lport = ntohs(lport);
+ 	masq_lport = ntohs(natlook.rsport);
++	masq_fport = ntohs(natlook.rdport);
+ 
+ 	sin_setv4(natlook.rsaddr.v4.s_addr, &ss);
+ 
+ 	if (opt_enabled(FORWARD)) {
+-		ret = fwd_request(sock, lport, masq_lport, fport, &ss);
++		ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+ 		if (ret == 0)
+ 			return (0);
+ 		else {
+ 			char ipbuf[MAX_IPLEN];
+diff -r -U4 oidentd-2.0.8/src/kernel/openbsd.c oidentd-2.0.8a/src/kernel/openbsd.c
+--- oidentd-2.0.8/src/kernel/openbsd.c	2006-05-22 01:31:19.000000000 +0100
++++ oidentd-2.0.8a/src/kernel/openbsd.c	2007-04-10 18:45:54.000000000 +0100
+@@ -253,8 +253,9 @@
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+ 		int ret;
+ 		in_port_t masq_lport;
++		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1)
+ 			break;
+ 
+@@ -283,13 +284,14 @@
+ 
+ 		lport = ntohs(lport);
+ 		fport = ntohs(fport);
+ 		masq_lport = ntohs(nat.nat_inport);
++		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+ 		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, &ss);
++			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+ 			if (ret == 0)
+ 				return (0);
+ 			else {
+ 				char ipbuf[MAX_IPLEN];
+diff -r -U4 oidentd-2.0.8/src/oidentd_masq.c oidentd-2.0.8a/src/oidentd_masq.c
+--- oidentd-2.0.8/src/oidentd_masq.c	2006-05-22 04:34:00.000000000 +0100
++++ oidentd-2.0.8a/src/oidentd_masq.c	2007-04-10 18:41:13.000000000 +0100
+@@ -243,8 +243,9 @@
+ int fwd_request(	int sock,
+ 					in_port_t real_lport,
+ 					in_port_t masq_lport,
+ 					in_port_t real_fport,
++					in_port_t masq_fport,
+ 					struct sockaddr_storage *mrelay)
+ {
+ 	char ipbuf[MAX_IPLEN];
+ 	char user[512];
+@@ -279,9 +280,9 @@
+ 			ipbuf, ntohs(sin_port(mrelay)), strerror(errno));
+ 		goto out_fail;
+ 	}
+ 
+-	if (sockprintf(fsock, "%d , %d\r\n", masq_lport, real_fport) < 1) {
++	if (sockprintf(fsock, "%d , %d\r\n", masq_lport, masq_fport) < 1) {
+ 		debug("write: %s", strerror(errno));
+ 		goto out_fail;
+ 	}
+ 
+@@ -312,10 +313,10 @@
+ 	sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 		real_lport, real_fport, ret_os, user);
+ 
+ 	o_log(NORMAL,
+-		"[%s] Successful lookup (by forward): %d (%d) , %d : %s",
+-		ipbuf, real_lport, masq_lport, real_fport, user);
++		"[%s] Successful lookup (by forward): %d (%d) , %d (%d) : %s",
++		ipbuf, real_lport, masq_lport, real_fport, masq_fport, user);
+ 
+ 	return (0);
+ 
+ out_fail:
+diff -r -U4 oidentd-2.0.8/src/oidentd_masq.h oidentd-2.0.8a/src/oidentd_masq.h
+--- oidentd-2.0.8/src/oidentd_masq.h	2006-05-21 23:52:24.000000000 +0100
++++ oidentd-2.0.8a/src/oidentd_masq.h	2007-04-10 18:41:22.000000000 +0100
+@@ -30,8 +30,9 @@
+ int fwd_request(int sock,
+ 				in_port_t real_lport,
+ 				in_port_t masq_lport,
+ 				in_port_t real_fport,
++				in_port_t masq_fport,
+ 				struct sockaddr_storage *mrelay);
+ 
+ #endif
+ 

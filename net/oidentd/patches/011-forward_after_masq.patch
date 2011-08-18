@@ -1,0 +1,415 @@
+diff -U4 -r oidentd-2.0.8/ChangeLog oidentd-2.0.8b/ChangeLog
+--- oidentd-2.0.8/ChangeLog	2007-04-10 18:57:11.000000000 +0100
++++ oidentd-2.0.8b/ChangeLog	2007-04-10 20:57:27.000000000 +0100
+@@ -1,10 +1,12 @@
+-Tue Apr 10 18:45:00 BST 2006    Simon Arlott <oidentd@fire.lp0.eu>
++Tue Apr 10 20:57:00 BST 2006    Simon Arlott <oidentd@fire.lp0.eu>
+ 
+     * Fix bug handling NAT with a different destination port on Linux.
+ 
+     * Fix forwarding when the destination port is different.
+ 
++    * Add an option that does forwarding only if the masquerading file lookup fails.
++
+ Mon May 22 00:20:15 EDT 2006    Ryan McCabe <ryan@numb.org>
+ 
+     * Released as version 2.0.8.
+ 
+diff -U4 -r oidentd-2.0.8/doc/oidentd.8 oidentd-2.0.8b/doc/oidentd.8
+--- oidentd-2.0.8/doc/oidentd.8	2003-07-13 19:27:52.000000000 +0100
++++ oidentd-2.0.8b/doc/oidentd.8	2007-04-10 20:56:53.000000000 +0100
+@@ -104,8 +104,12 @@
+ .BR oidentd_masq.conf (5)
+ for details on configuring support for masqueraded/NAT connections.
+ 
+ .TP
++.B "\-M or \-\-forward-last"
++Check IP masquerading file before forwarding.
++
++.TP
+ .B "\-o or \-\-other=[<string>]"
+ The string specified will be returned as the OS string by default for all successful ident lookups. If no argument is given, "OTHER" will be returned instead of the name of the operating system. Some requests may be interpreted as having failed by the client side (with ident in general, not just with \fBoidentd\fP), when some other string is returned instead of the actual name of the operating system.
+ 
+ .TP
+diff -U4 -r oidentd-2.0.8/src/kernel/darwin.c oidentd-2.0.8b/src/kernel/darwin.c
+--- oidentd-2.0.8/src/kernel/darwin.c	2007-04-10 18:43:31.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/darwin.c	2007-04-10 20:38:30.000000000 +0100
+@@ -261,9 +261,10 @@
+ 	if (getbuf(kinfo->nl[N_NATLIST].n_value, &np, sizeof(np)) == -1)
+ 		return (-1);
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+-		int ret;
++		int retf;
++		int retm;
+ 		in_port_t masq_lport;
+ 		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1)
+@@ -298,23 +299,25 @@
+ 		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+-		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+-			if (ret == 0)
+-				return (0);
+-			else {
++		retm = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
++		
++		if (opt_enabled(FORWARD) && (retm != 0 || !opt_enabled(MASQ_OVERRIDE))) {
++			retf = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++			if (retf == 0) {
++				if (retm != 0)
++					return (0);
++			} else {
+ 				char ipbuf[MAX_IPLEN];
+ 
+ 				get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 				debug("Forward to %s (%d %d) failed",
+ 					ipbuf, nat.nat_inport, fport);
+ 			}
+ 		}
+-
+-		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+-		if (ret == 0) {
++		
++		if (retm == 0) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 				lport, fport, os, user);
+diff -U4 -r oidentd-2.0.8/src/kernel/freebsd5.c oidentd-2.0.8b/src/kernel/freebsd5.c
+--- oidentd-2.0.8/src/kernel/freebsd5.c	2007-04-10 18:44:26.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/freebsd5.c	2007-04-10 20:39:49.000000000 +0100
+@@ -414,9 +414,10 @@
+ 	if (getbuf(kinfo->nl[N_NATLIST].n_value, &np, sizeof(np)) == -1)
+ 		return (-1);
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+-		int ret;
++		int retm;
++		int retf;
+ 		in_port_t masq_lport;
+ 		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1) {
+@@ -453,14 +454,17 @@
+ 		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+-		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++		retm = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+ 
+-			if (ret == 0)
+-				return (0);
+-			else {
++		if (opt_enabled(FORWARD) && (retm != 0 || !opt_enabled(MASQ_OVERRIDE))) {
++			retf = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++
++			if (retf == 0) {
++				if (retm != 0)
++					return (0);
++			} else {
+ 				char ipbuf[MAX_IPLEN];
+ 
+ 				get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 
+@@ -468,10 +472,9 @@
+ 					ipbuf, lport, fport, nat.nat_inport, nat.nat_outport);
+ 			}
+ 		}
+ 
+-		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+-		if (ret == 0) {
++		if (retm == 0) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 				lport, fport, os, user);
+diff -U4 -r oidentd-2.0.8/src/kernel/freebsd.c oidentd-2.0.8b/src/kernel/freebsd.c
+--- oidentd-2.0.8/src/kernel/freebsd.c	2007-04-10 18:44:15.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/freebsd.c	2007-04-10 20:40:25.000000000 +0100
+@@ -433,9 +433,10 @@
+ 	if (getbuf(kinfo->nl[N_NATLIST].n_value, &np, sizeof(np)) == -1)
+ 		return (-1);
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+-		int ret;
++		int retm;
++		int retf;
+ 		in_port_t masq_lport;
+ 		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1) {
+@@ -472,14 +473,17 @@
+ 		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+-		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++		retm = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+ 
+-			if (ret == 0)
+-				return (0);
+-			else {
++		if (opt_enabled(FORWARD) && (retm != 0 || !opt_enabled(MASQ_OVERRIDE))) {
++			retf = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++
++			if (retf == 0) {
++				if (retm != 0)
++					return (0);
++			} else {
+ 				char ipbuf[MAX_IPLEN];
+ 
+ 				get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 
+@@ -487,10 +491,9 @@
+ 					ipbuf, lport, fport, nat.nat_inport, nat.nat_outport);
+ 			}
+ 		}
+ 
+-		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+-		if (ret == 0) {
++		if (retm == 0) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 				lport, fport, os, user);
+diff -U4 -r oidentd-2.0.8/src/kernel/linux.c oidentd-2.0.8b/src/kernel/linux.c
+--- oidentd-2.0.8/src/kernel/linux.c	2007-04-10 19:58:44.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/linux.c	2007-04-10 20:41:37.000000000 +0100
+@@ -406,9 +406,11 @@
+ 		}
+ 
+ 		sin_setv4(htonl(localm), &ss);
+ 
+-		if (opt_enabled(FORWARD)) {
++		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
++
++		if (opt_enabled(FORWARD) && (ret != 0 || !opt_enabled(MASQ_OVERRIDE))) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			if (fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss) == 0)
+ 				goto out_success;
+@@ -417,9 +419,8 @@
+ 
+ 			debug("Forward to %s (%d %d) failed", ipbuf, masq_lport, fport);
+ 		}
+ 
+-		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+ 		if (ret == 0) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+diff -U4 -r oidentd-2.0.8/src/kernel/netbsd.c oidentd-2.0.8b/src/kernel/netbsd.c
+--- oidentd-2.0.8/src/kernel/netbsd.c	2007-04-10 18:44:44.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/netbsd.c	2007-04-10 20:42:32.000000000 +0100
+@@ -287,9 +287,10 @@
+ 	if (getbuf(kinfo->nl[N_NATLIST].n_value, &np, sizeof(np)) == -1)
+ 		return (-1);
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+-		int ret;
++		int retm;
++		int retf;
+ 		in_port_t masq_lport;
+ 		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1)
+@@ -324,23 +325,25 @@
+ 		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+-		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+-			if (ret == 0)
+-				return (0);
+-			else {
++		retm = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
++
++		if (opt_enabled(FORWARD) && (retm != 0 || !opt_enabled(MASQ_OVERRIDE))) {
++			retf = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++			if (retf == 0) {
++				if (retm != 0)
++					return (0);
++			} else {
+ 				char ipbuf[MAX_IPLEN];
+ 
+ 				get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 				debug("Forward to %s (%d %d) failed",
+ 					ipbuf, nat.nat_inport, fport);
+ 			}
+ 		}
+ 
+-		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+-		if (ret == 0) {
++		if (retm == 0) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 				lport, fport, os, user);
+diff -U4 -r oidentd-2.0.8/src/kernel/openbsd30.c oidentd-2.0.8b/src/kernel/openbsd30.c
+--- oidentd-2.0.8/src/kernel/openbsd30.c	2007-04-10 18:45:23.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/openbsd30.c	2007-04-10 20:43:11.000000000 +0100
+@@ -119,9 +119,10 @@
+ 			struct sockaddr_storage *faddr)
+ {
+ 	struct pfioc_natlook natlook;
+ 	int pfdev;
+-	int ret;
++	int retm;
++	int retf;
+ 	char os[24];
+ 	char user[MAX_ULEN];
+ 	struct sockaddr_storage ss;
+ 	in_port_t masq_lport;
+@@ -161,23 +162,25 @@
+ 	masq_fport = ntohs(natlook.rdport);
+ 
+ 	sin_setv4(natlook.rsaddr.v4.s_addr, &ss);
+ 
+-	if (opt_enabled(FORWARD)) {
+-		ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+-		if (ret == 0)
+-			return (0);
+-		else {
++	retm = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
++
++	if (opt_enabled(FORWARD) && (retm != 0 || !opt_enabled(MASQ_OVERRIDE))) {
++		retf = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++		if (retf == 0) {
++			if (retm != 0)
++				return (0);
++		} else {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 			debug("Forward to %s (%d %d) (%d) failed",
+ 				ipbuf, lport, natlook.rsport, fport);
+ 		}
+ 	}
+ 
+-	ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+-	if (ret == 0) {
++	if (retm == 0) {
+ 		char ipbuf[MAX_IPLEN];
+ 
+ 		sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 				lport, fport, os, user);
+diff -U4 -r oidentd-2.0.8/src/kernel/openbsd.c oidentd-2.0.8b/src/kernel/openbsd.c
+--- oidentd-2.0.8/src/kernel/openbsd.c	2007-04-10 18:45:54.000000000 +0100
++++ oidentd-2.0.8b/src/kernel/openbsd.c	2007-04-10 20:43:47.000000000 +0100
+@@ -251,9 +251,10 @@
+ 	if (getbuf(kinfo->nl[N_NATLIST].n_value, &np, sizeof(np)) == -1)
+ 		return (-1);
+ 
+ 	for (; np != NULL ; np = nat.nat_next) {
+-		int ret;
++		int retm;
++		int retf;
+ 		in_port_t masq_lport;
+ 		in_port_t masq_fport;
+ 
+ 		if (getbuf((u_long) np, &nat, sizeof(nat)) == -1)
+@@ -288,23 +289,25 @@
+ 		masq_fport = ntohs(nat.nat_outport);
+ 
+ 		sin_setv4(nat.nat_inip.s_addr, &ss);
+ 
+-		if (opt_enabled(FORWARD)) {
+-			ret = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
+-			if (ret == 0)
+-				return (0);
+-			else {
++		retm = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
++
++		if (opt_enabled(FORWARD) && (retm != 0 || !opt_enabled(MASQ_OVERRIDE))) {
++			retf = fwd_request(sock, lport, masq_lport, fport, masq_fport, &ss);
++			if (retf == 0) {
++				if (retm != 0)
++					return (0);
++			} else {
+ 				char ipbuf[MAX_IPLEN];
+ 
+ 				get_ip(&ss, ipbuf, sizeof(ipbuf));
+ 				debug("Forward to %s (%d %d) failed",
+ 					ipbuf, lport, nat.nat_inport);
+ 			}
+ 		}
+ 
+-		ret = find_masq_entry(&ss, user, sizeof(user), os, sizeof(os));
+-		if (ret == 0) {
++		if (retm == 0) {
+ 			char ipbuf[MAX_IPLEN];
+ 
+ 			sockprintf(sock, "%d , %d : USERID : %s : %s\r\n",
+ 				lport, fport, os, user);
+diff -U4 -r oidentd-2.0.8/src/oidentd_options.c oidentd-2.0.8b/src/oidentd_options.c
+--- oidentd-2.0.8/src/oidentd_options.c	2006-05-22 01:31:19.000000000 +0100
++++ oidentd-2.0.8b/src/oidentd_options.c	2007-04-10 20:32:40.000000000 +0100
+@@ -39,9 +39,9 @@
+ #include <oidentd_user_db.h>
+ #include <oidentd_options.h>
+ 
+ #ifdef MASQ_SUPPORT
+-#	define OPTSTRING "a:c:C:def::g:hiIl:mo::p:P:qr:St:u:Uv"
++#	define OPTSTRING "a:c:C:def::g:hiIl:mMo::p:P:qr:St:u:Uv"
+ 	extern in_port_t fwdport;
+ #else
+ #	define OPTSTRING "a:c:C:deg:hiIl:o::p:P:qr:St:u:Uv"
+ #endif
+@@ -84,9 +84,10 @@
+ #endif
+ 	{"version",				no_argument,		0, 'v'},
+ #ifdef MASQ_SUPPORT
+ 	{"forward",				optional_argument,	0, 'f'},
+-	{"masquerade",			no_argument,		0, 'm'},
++	{"masquerade",				no_argument,		0, 'm'},
++	{"forward-last",			no_argument,		0, 'M'},
+ #endif
+ 	{"proxy",				required_argument,	0, 'P'},
+ 	{NULL, 0, NULL, 0}
+ };
+@@ -204,8 +205,13 @@
+ 			case 'm':
+ 				enable_opt(MASQ);
+ 				break;
+ 
++			case 'M':
++				enable_opt(MASQ);
++				enable_opt(MASQ_OVERRIDE);
++				break;
++
+ #endif
+ 			case 'P':
+ 			{
+ 				if (get_addr(optarg, &proxy) == -1) {
+@@ -387,8 +393,9 @@
+ 
+ #ifdef MASQ_SUPPORT
+ "-f or --forward [<port>]     Forward requests for masqueraded hosts to the host on port <port>\n"
+ "-m or --masquerade           Enable support for IP masquerading\n"
++"-M or --forward-last         Check IP masquerading file before forwarding\n"
+ #endif
+ 
+ "-P or --proxy <host>         <host> acts as a proxy, forwarding connections to us\n"
+ "-g or --group <group>        Run with specified group or GID\n"
+diff -U4 -r oidentd-2.0.8/src/oidentd_options.h oidentd-2.0.8b/src/oidentd_options.h
+--- oidentd-2.0.8/src/oidentd_options.h	2006-05-21 23:52:24.000000000 +0100
++++ oidentd-2.0.8b/src/oidentd_options.h	2007-04-10 20:31:13.000000000 +0100
+@@ -32,8 +32,9 @@
+ #define QUIET				(1 << 0x09)
+ #define FOREGROUND			(1 << 0x0a)
+ #define NOSYSLOG			(1 << 0x0b)
+ #define STDIO				(1 << 0x0c)
++#define MASQ_OVERRIDE		(1 << 0x0d)
+ 
+ bool opt_enabled(u_int32_t option);
+ void disable_opt(u_int32_t option);
+ int get_options(int argc, char *const argv[]);

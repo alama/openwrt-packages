@@ -1,0 +1,38 @@
+diff -U4 -r oidentd-2.0.8/ChangeLog oidentd-2.0.8e/ChangeLog
+--- oidentd-2.0.8/ChangeLog	2007-04-10 22:13:49.000000000 +0100
++++ oidentd-2.0.8e/ChangeLog	2007-04-10 22:13:54.000000000 +0100
+@@ -9,8 +9,10 @@
+     * Support Layer 3 Independent Connection tracking on Linux.
+ 
+ 	* Handle local NAT on Linux (instead of fowarding to self).
+ 
++	* Copy fport before converting v4-mapped v6 addresses.
++
+ Mon May 22 00:20:15 EDT 2006    Ryan McCabe <ryan@numb.org>
+ 
+     * Released as version 2.0.8.
+ 
+diff -U4 -r oidentd-2.0.8/src/oidentd.c oidentd-2.0.8e/src/oidentd.c
+--- oidentd-2.0.8/src/oidentd.c	2006-05-22 01:43:26.000000000 +0100
++++ oidentd-2.0.8e/src/oidentd.c	2007-04-10 22:08:25.000000000 +0100
+@@ -225,8 +225,10 @@
+ 		debug("getsockname: %s", strerror(errno));
+ 		return (-1);
+ 	}
+ 
++	fport = htons(sin_port(&faddr));
++
+ #ifdef WANT_IPV6
+ 	laddr6 = laddr;
+ 	faddr6 = faddr;
+ 
+@@ -242,9 +244,8 @@
+ 		sin_setv4(in4.s_addr, &faddr);
+ 	}
+ #endif
+ 
+-	fport = htons(sin_port(&faddr));
+ 	get_ip(&faddr, ip_buf, sizeof(ip_buf));
+ 
+ 	if (get_hostname(&faddr, host_buf, sizeof(host_buf)) != 0) {
+ 		o_log(NORMAL, "Connection from %s:%d", ip_buf, fport);
